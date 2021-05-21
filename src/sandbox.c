@@ -7,12 +7,13 @@ extern char *optarg;
 extern int erron;
 
 #define STACK_SIZE (1024*1024)
-static char stack[STACK_SIZE];
-static bool is_net = false;
 static char fsy[] = "/tmp/sandbox/";
 static char fsy_upper [256];
 static char fsy_worker[256];
 static char fsy_merged[256];
+static bool is_net = false;
+static int  strace_fun = 0;
+static char stack[STACK_SIZE];
 
 int pipefd[2];
 
@@ -152,18 +153,29 @@ void set_gid_map(pid_t pid, int inside_id, int outside_id, int length) {
 }
 
 void handle_arg(int argc, char *argv[]) {
-	int c;
-	while (EOF != (c = getopt(argc, argv, "hn"))) {
+	int c, opt;
+	char *end;
+	while (EOF != (c = getopt(argc, argv, "hns:"))) {
 		switch (c) {
 			case 'h':
-				printf("%s [-hn]\n", argv[0]);
+				printf("%s [-hn] [-s [1 2 3]] \n", argv[0]);
 				puts("\t-h: manual");
 				puts("\t-n: enable network");
+				puts("\t-s: enable starce");
+				puts("\t\t 1. strace");
+				puts("\t\t 2. inotify");
+				puts("\t\t 3. seccom");
 				exit(0);
 				break;
 			case 'n':
 				is_net = true;
 				break;
+			case 's':
+				opt = strtol(optarg, &end, 10);
+				if (end == optarg) {
+					fprintf(stderr, "ERROR: can't convert string(\"%s\") to number\n", optarg);
+					exit(1);
+				}
 			default:
 				printf("%s: unknow option:%c\n", argv[0], optopt);
 				exit(1);
