@@ -1,19 +1,29 @@
 #include "headers.h"
-#include <stdio.h>
-#include <unistd.h>
+
+#define STACK_SIZE (1024*1024)
+#define DEBUG_OUTPUT(...) \
+	do { \
+		if (is_debug) { \
+			__VA_ARGS__; \
+		} \
+	} while (0)
 
 extern int optind, opterr, optopt;
 extern char *optarg;
 extern int erron;
 
-#define STACK_SIZE (1024*1024)
+
+static char sandbox_name[] = "sandbox";
 static char fsy[] = "/tmp/sandbox/";
 static char fsy_upper [256];
 static char fsy_worker[256];
 static char fsy_merged[256];
+static bool is_debug = false;
 static bool is_net = false;
 static int  strace_fun = 0;
 static char stack[STACK_SIZE];
+
+static struct timeval start, finish;
 
 int pipefd[2];
 
@@ -37,14 +47,16 @@ void umount_overlay(void);
 // c_main 
 int c_main(void *arg) {
 	char ch;
+	char cmd[1024];
 	int ret;
 	uid_t uid = getuid();
 
 	// 等待父进程
 	close(pipefd[1]);
 	read(pipefd[0], &ch, 1);
+	close(pipefd[0]);
 
-	sethostname("container", 10);
+	sethostname(sandbox_name, sizeof(sandbox_name));
 
 	// 重新挂载文件系统
 	c_remount();
@@ -52,7 +64,22 @@ int c_main(void *arg) {
 	// 永久放弃特权
 	setresuid(uid, uid, uid);
 	puts("c_main");
-	print_id();
+	DEBUG_OUTPUT(print_id());
+
+	switch (strace_fun) {
+		case 1: // ptrace
+			puts("功能限制，请手动调用 --> trace.out");
+			break;
+		case 2: // inotifyAPI
+			break;
+		case 3:
+			break;
+		default:
+			break;
+	}
+	gettimeofday(&finish, NULL);
+	printf("启动花费时间: %.3fms\n", (float)(finish.tv_sec - finish.tv_sec) * 1000 +
+			(float)(finish.tv_usec - start.tv_usec)/1000);
 
 	ret = execv("/bin/bash", c_args);
 	if (ret < 0) {
@@ -97,8 +124,10 @@ void c_remount() {
 }
 void mkoverlay() {
 	DIR *dp;
-	char cmd[2048];
+	char cmd[1024];
+	int ret;
 
+	DEBUG_OUTPUT(puts("构建文件系统..."));
 	// 构建overlay位置
 	dp = opendir(fsy);
 	if (NULL == dp) {
@@ -113,9 +142,12 @@ void mkoverlay() {
 	maked();
 
 	// 挂载overlay
-	snprintf(cmd, 2048, "mount -t overlay overlay -o lowerdir=/,upperdir=%s,workdir=%s %s",
-			fsy_upper, fsy_worker, fsy_merged);
-	system(cmd);
+	snprintf(cmd, sizeof(cmd), "lowerdir=/,upperdir=%s,workdir=%s", fsy_worker, fsy_merged);
+	ret = mount("overlay", fsy_merged, "overlay", 0, cmd);
+	if (ret == -1) {
+		perror("c_main mount");
+		exit(1);
+	}
 }
 
 void set_map(char *file, int inside_id, int outside_id, int length) {
@@ -155,12 +187,13 @@ void set_gid_map(pid_t pid, int inside_id, int outside_id, int length) {
 void handle_arg(int argc, char *argv[]) {
 	int c, opt;
 	char *end;
-	while (EOF != (c = getopt(argc, argv, "hns:"))) {
+	while (EOF != (c = getopt(argc, argv, "dhns:"))) {
 		switch (c) {
 			case 'h':
 				printf("%s [-hn] [-s [1 2 3]] \n", argv[0]);
 				puts("\t-h: manual");
 				puts("\t-n: enable network");
+				puts("\t-d: enable debug");
 				puts("\t-s: enable starce");
 				puts("\t\t 1. strace");
 				puts("\t\t 2. inotify");
@@ -176,6 +209,10 @@ void handle_arg(int argc, char *argv[]) {
 					fprintf(stderr, "ERROR: can't convert string(\"%s\") to number\n", optarg);
 					exit(1);
 				}
+				break;
+			case 'd':
+				is_debug = true;
+				break;
 			default:
 				printf("%s: unknow option:%c\n", argv[0], optopt);
 				exit(1);
@@ -185,6 +222,7 @@ void handle_arg(int argc, char *argv[]) {
 }
 
 void umount_overlay() {
+	DEBUG_OUTPUT(puts("卸载文件系统"));
 	if (umount(fsy_merged) != 0) {
 		perror("umount");
 		exit(1);
@@ -198,12 +236,13 @@ void print_id() {
 			getuid(), getgid(), geteuid(), getegid(), suid);
 }
 
-int main(int argc, char *argv[])
-{
+int main(int argc, char *argv[]) {
 	int pid;
 	uid_t uid = getuid(), euid = geteuid(), suid;
 	gid_t gid = getgid(), egid = getegid();
-	print_id();
+	DEBUG_OUTPUT(print_id());
+
+	gettimeofday(&start, NULL);
 
 	getresuid(&uid, &euid, &suid);
 
@@ -213,15 +252,19 @@ int main(int argc, char *argv[])
 	// 命令行参数处理
 	handle_arg(argc, argv);
 
+	DEBUG_OUTPUT(puts("获取权限..."));
 	setresuid(euid, euid, -1); // 获取权限
-	print_id();
+	DEBUG_OUTPUT(print_id());
+
 	// 构建overlay
 	mkoverlay();
+	DEBUG_OUTPUT(puts("放弃权限..."));
 	setresuid(uid, uid, -1); // 暂时放弃权限
-	print_id();
+	DEBUG_OUTPUT(print_id());
 
 	pipe(pipefd);
 	// 启动命名空间
+	DEBUG_OUTPUT(puts("clone 子进程..."));
 	pid = clone(c_main, stack + STACK_SIZE, CLONE_NEWUSER |
 			CLONE_NEWIPC | CLONE_NEWNET | CLONE_NEWUTS |
 			CLONE_NEWNS | CLONE_NEWPID | SIGCHLD, NULL);
@@ -229,37 +272,46 @@ int main(int argc, char *argv[])
 		perror("clone");
 		return 1;
 	}
+	DEBUG_OUTPUT(puts("获取权限..."));
 	setresuid(euid, euid, -1); // 获取权限
-	print_id();
+	DEBUG_OUTPUT(print_id());
 	// 映射uid和gid
+	DEBUG_OUTPUT(puts("重新映射用户id..."));
 	set_uid_map(pid, 0, 0, 65535);
 	set_gid_map(pid, 0, 0, 65535);
+	DEBUG_OUTPUT(puts("临时放弃权限"));
 	setresuid(uid, uid, -1); // 暂时放弃权限
-	print_id();
+	DEBUG_OUTPUT(print_id());
 
-	// 通知子进程
-	close(pipefd[1]);
-	
 	// 判断网络连接是否启用
 	if (is_net) {
+		DEBUG_OUTPUT(puts("设置网络..."));
 		char cmd[30];
 		sprintf(cmd, "./net.sh %d", pid);
 		printf("%s\n", cmd);
 //		system(cmd);
 	}
+	// 通知子进程
+	close(pipefd[0]);
+	close(pipefd[1]);
+	
 	
 	// 等待子进程退出
 	waitpid(pid, NULL, 0);
 	
 	// 获取权限
+	DEBUG_OUTPUT(puts("获取权限..."));
 	setresuid(euid, euid, -1);
+
 	// 父重新挂载proc
+	DEBUG_OUTPUT(puts("重新挂载proc系统"));
 	mount("proc", "/proc", "proc", 0, NULL);
 	// 卸载overlay
 	umount_overlay();
 	// 放弃权限
+	DEBUG_OUTPUT(puts("永久放弃权限..."));
 	setresuid(uid, uid, uid);
 	
-	puts("c finished");
+	printf("被更改的文件位于：%s\n", fsy_upper);
 	return 0;
 }

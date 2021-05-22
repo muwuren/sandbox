@@ -2,12 +2,15 @@
 
 pid="$1"
 
-# 创建网桥
-ip link add name bridge_name type bridge
-# 启动网桥
-ip link set dev bridge_name up
-# 设置地址
-ip addr add dev bridge_name 192.168.12.1/24
+result=$(ip link | grep "bridge_name")
+if [[ -z "$result" ]]; then
+	# 创建网桥
+	ip link add name bridge_name type bridge
+	# 启动网桥
+	ip link set dev bridge_name up
+	# 设置地址
+	ip addr add dev bridge_name 192.168.12.1/24
+fi
 
 # 设置网络命名空间
 # ip netns add ns0
